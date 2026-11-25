@@ -67,11 +67,11 @@ describe('schemas', () => {
       registerSchema.safeParse({
         organizationName: 'Acme',
         displayName: 'A',
-        email: 'A@X.io',
+        email: 'A@X.example',
         password: 'short',
       }).success,
     ).toBe(false);
-    expect(loginSchema.parse({ email: ' A@X.IO ', password: 'p' }).email).toBe('a@x.io');
+    expect(loginSchema.parse({ email: ' A@X.EXAMPLE ', password: 'p' }).email).toBe('a@x.example');
   });
 });
 
