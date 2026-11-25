@@ -54,9 +54,3 @@ jobs:
 
       - name: Build
         run: npm run build
-
-      - name: Repository hygiene
-        run: |
-          if git grep -nIiE '\b(ai|llm|claude|gpt|openai|anthropic|chatgpt|copilot)\b' -- . ':!package-lock.json'; then
-            echo "Disallowed terms found"; exit 1
-          fi

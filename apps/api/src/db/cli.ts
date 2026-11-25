@@ -13,6 +13,8 @@ const run = async (command: string | undefined): Promise<void> => {
         `migrations applied: ${applied.join(', ') || 'none'} (already applied: ${skipped.length})`,
       );
     } else if (command === 'seed') {
+      if (config.isProduction)
+        throw new Error('Refusing to load public demo accounts into production');
       const { rows } = await pool.query<{ n: number }>('SELECT count(*)::int AS n FROM users');
       if ((rows[0]?.n ?? 0) > 0) {
         console.warn('database already has users; skipping seed (use reset to start over)');
