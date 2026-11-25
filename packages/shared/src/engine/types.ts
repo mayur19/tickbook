@@ -70,7 +70,14 @@ export type RejectReason =
   | 'duplicate_order_id';
 
 export type CancelReason =
-  'ioc_remainder' | 'fok_unfillable' | 'market_no_liquidity' | 'user_requested';
+  | 'ioc_remainder'
+  | 'fok_unfillable'
+  | 'market_no_liquidity'
+  | 'user_requested'
+  | 'insufficient_funds';
+
+/** Reasons a cancel command may carry; venue-initiated cancels use `insufficient_funds`. */
+export type CancelCommandReason = 'user_requested' | 'insufficient_funds';
 
 export interface PlaceCommand {
   readonly kind: 'place';
@@ -84,6 +91,8 @@ export interface CancelCommand {
   readonly orderId: string;
   readonly accountId: string;
   readonly ts: string;
+  /** Defaults to `user_requested`. Journaled, so replay reproduces the same reason. */
+  readonly reason?: CancelCommandReason;
 }
 
 export type EngineCommand = PlaceCommand | CancelCommand;

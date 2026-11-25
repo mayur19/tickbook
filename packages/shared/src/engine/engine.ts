@@ -113,7 +113,7 @@ const cancel = (state: EngineState, cmd: CancelCommand): CommandResult => {
         type: 'cancelled',
         orderId: cmd.orderId,
         remaining: loc.order.remaining,
-        reason: 'user_requested',
+        reason: cmd.reason ?? 'user_requested',
       },
     ],
   };

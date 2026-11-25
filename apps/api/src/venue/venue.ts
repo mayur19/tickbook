@@ -8,6 +8,7 @@ import {
   type MarketMessage,
 } from '@tickbook/shared';
 import type { InstrumentRecord } from '../modules/instruments/instruments.repository.js';
+import { KeyedMutex } from './keyed-mutex.js';
 
 export type MarketListener = (message: MarketMessage) => void;
 
@@ -43,6 +44,7 @@ export const specOf = (i: InstrumentRecord): InstrumentSpec => ({
 export class Venue {
   private readonly runtimes = new Map<string, Runtime>();
   private readonly listeners = new Map<string, Set<MarketListener>>();
+  private readonly accountLocks = new KeyedMutex();
 
   constructor(private readonly depthLevels: number) {}
 
@@ -74,9 +76,7 @@ export class Venue {
    */
   serialize<T>(
     symbol: string,
-    handler: (
-      view: InstrumentView,
-    ) => Promise<{
+    handler: (view: InstrumentView) => Promise<{
       next: EngineState | null;
       events: readonly EngineEvent[];
       ts: string;
@@ -126,8 +126,19 @@ export class Venue {
     if (updates.length > 0) this.publish(symbol, { type: 'depth', symbol, seq: next.seq, updates });
   }
 
-  /** Cash committed to resting buy orders of `accountId` across every instrument. */
-  reservedCash(accountId: string): number {
+  /**
+   * Runs `fn` holding the account's reservation lock. Call only from inside
+   * `serialize` (instrument first, then account; never the reverse).
+   */
+  withAccountLock<T>(accountId: string, fn: () => Promise<T>): Promise<T> {
+    return this.accountLocks.run(accountId, fn);
+  }
+
+  /**
+   * Cash implied by `accountId`'s resting buy orders across every book. The
+   * durable figure is accounts.reserved_cash_minor; this is used to reconcile it.
+   */
+  bookReservedCash(accountId: string): number {
     let total = 0;
     for (const rt of this.runtimes.values())
       total += exposureOf(rt.state.book, accountId).buyNotional;

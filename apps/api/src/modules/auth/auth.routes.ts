@@ -62,14 +62,12 @@ export const registerAuthRoutes = (app: FastifyInstance, deps: AppDeps): void =>
       throw tooMany(reply, limit.retryAfterSeconds, 'Too many registrations; try again later');
     const input = parse(registerSchema, req.body);
     await register(pool, input, clientOf(req));
-    return reply
-      .status(202)
-      .send(
-        ok({
-          message:
-            'If the details are valid, the organization is ready. Sign in with your email and password.',
-        }),
-      );
+    return reply.status(202).send(
+      ok({
+        message:
+          'If the details are valid, the organization is ready. Sign in with your email and password.',
+      }),
+    );
   });
 
   app.post('/api/v1/auth/login', async (req, reply) => {

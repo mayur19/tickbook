@@ -4,7 +4,12 @@
  * and reports commands per second and per-command latency percentiles.
  */
 import { performance } from 'node:perf_hooks';
-import { applyCommand, initialState, type EngineCommand, type InstrumentSpec } from '../src/index.js';
+import {
+  applyCommand,
+  initialState,
+  type EngineCommand,
+  type InstrumentSpec,
+} from '../src/index.js';
 
 const SPEC: InstrumentSpec = { symbol: 'BENCH', tickSize: 1, lotSize: 1, maxOrderQty: 1_000_000 };
 const COMMANDS = Number(process.argv[2] ?? 100_000);
@@ -52,7 +57,8 @@ for (let i = 0; i < COMMANDS; i += 1) {
 }
 const elapsed = performance.now() - start;
 const sorted = Array.from(latencies).sort((a, b) => a - b);
-const pct = (p: number) => ((sorted[Math.floor((p / 100) * (sorted.length - 1))] ?? 0) * 1000).toFixed(1);
+const pct = (p: number) =>
+  ((sorted[Math.floor((p / 100) * (sorted.length - 1))] ?? 0) * 1000).toFixed(1);
 
 console.warn(
   JSON.stringify({

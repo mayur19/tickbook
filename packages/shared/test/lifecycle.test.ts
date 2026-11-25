@@ -3,6 +3,7 @@ import {
   applyCommand,
   initialState,
   orderDeltas,
+  reservationDeltas,
   settlementDeltas,
   type EngineEvent,
 } from '../src/index.js';
@@ -99,5 +100,69 @@ describe('settlementDeltas', () => {
       { accountId: 'seller', cashDelta: 1000 + 450, positionDelta: -15 },
     ]);
     expect(deltas.reduce((s, d) => s + d.cashDelta, 0)).toBe(0);
+  });
+});
+
+describe('reservationDeltas', () => {
+  const buyOrder = (id: string, price: number | undefined, quantity: number, accountId = 'b') => ({
+    orderId: id,
+    accountId,
+    side: 'buy' as const,
+    type: price === undefined ? ('market' as const) : ('limit' as const),
+    tif: price === undefined ? ('IOC' as const) : ('GTC' as const),
+    ...(price === undefined ? {} : { price }),
+    quantity,
+  });
+
+  it('releases the unused part of a taker buy reservation and keeps the resting part', () => {
+    const s = applyCommand(
+      SPEC,
+      initialState('TBK'),
+      limit('sell', 100, 30, { orderId: 'm', accountId: 's' }),
+    ).state;
+    const order = buyOrder('t', 110, 50);
+    const r = applyCommand(SPEC, s, { kind: 'place', order, ts: 't' });
+    const d = reservationDeltas(r.events, { order, reserved: 110 * 50 });
+    // Spent 30 @ 100 (settled separately), 20 rest at 110.
+    expect(d.get('b')).toBe(-110 * 50 + 110 * 20);
+  });
+
+  it('releases maker buy reservations as they fill and on cancel', () => {
+    const s1 = applyCommand(
+      SPEC,
+      initialState('TBK'),
+      limit('buy', 100, 30, { orderId: 'mb', accountId: 'mk' }),
+    ).state;
+    const hit = applyCommand(SPEC, s1, limit('sell', 100, 10, { orderId: 'ts', accountId: 'tk' }));
+    expect(reservationDeltas(hit.events, null)).toEqual(new Map([['mk', -1000]]));
+    const resting = hit.state.book.bids[0]!.orders[0]!;
+    const cancelled = applyCommand(SPEC, hit.state, {
+      kind: 'cancel',
+      orderId: 'mb',
+      accountId: 'mk',
+      ts: 't',
+      reason: 'insufficient_funds',
+    });
+    expect(cancelled.events[0]).toMatchObject({
+      type: 'cancelled',
+      reason: 'insufficient_funds',
+      remaining: 20,
+    });
+    expect(reservationDeltas(cancelled.events, null, new Map([['mb', resting]]))).toEqual(
+      new Map([['mk', -2000]]),
+    );
+  });
+
+  it('nets a fully filled taker buy to zero reservation and ignores sells', () => {
+    const s = applyCommand(
+      SPEC,
+      initialState('TBK'),
+      limit('sell', 100, 30, { orderId: 'm', accountId: 's' }),
+    ).state;
+    const order = buyOrder('t', undefined, 30);
+    const r = applyCommand(SPEC, s, { kind: 'place', order, ts: 't' });
+    expect(reservationDeltas(r.events, { order, reserved: 3000 })).toEqual(new Map([['b', -3000]]));
+    const sell = { ...buyOrder('x', 100, 10), side: 'sell' as const };
+    expect(reservationDeltas([], { order: sell, reserved: 0 }).size).toBe(0);
   });
 });

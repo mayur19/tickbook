@@ -76,5 +76,16 @@ export const reconcile = async (db: Queryable, venue: Venue): Promise<string[]> 
   for (const row of persisted.values()) {
     problems.push(`${row.symbol}: open order ${row.id} is missing from the book`);
   }
+  const accounts = await db.query<{ id: string; reserved_cash_minor: number }>(
+    'SELECT id, reserved_cash_minor FROM accounts',
+  );
+  for (const a of accounts.rows) {
+    const implied = venue.bookReservedCash(a.id);
+    if (implied !== a.reserved_cash_minor) {
+      problems.push(
+        `account ${a.id}: reserved cash ${a.reserved_cash_minor} != ${implied} implied by resting buys`,
+      );
+    }
+  }
   return problems;
 };

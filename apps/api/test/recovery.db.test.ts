@@ -79,6 +79,7 @@ describe('journal recovery', () => {
     const { venue } = await recoverVenue(ctx.pool, 20);
     expect(await reconcile(ctx.pool, venue)).toEqual([
       expect.stringContaining('missing from the book'),
+      expect.stringContaining('reserved cash 9000 != 0'),
     ]);
   });
 
@@ -96,7 +97,7 @@ describe('migration runner', () => {
   it('is idempotent and verifies checksums of applied migrations', async () => {
     const again = await migrate(ctx.pool);
     expect(again.applied).toEqual([]);
-    expect(again.skipped).toEqual(['0001', '0002']);
+    expect(again.skipped).toEqual(['0001', '0002', '0003']);
 
     const dir = await mkdtemp(path.join(tmpdir(), 'tb-mig-'));
     await writeFile(path.join(dir, '0001_foundation.sql'), '-- tampered');

@@ -14,11 +14,9 @@ export const registerAccountRoutes = (app: FastifyInstance, deps: AppDeps): void
     );
     return ok(
       accounts.map((a) => {
-        const reserved = deps.venue.reservedCash(a.id);
         return {
           ...a,
-          reservedCashMinor: reserved,
-          availableCashMinor: a.cashMinor - reserved,
+          availableCashMinor: a.cashMinor - a.reservedCashMinor,
           positions: positions
             .filter((p) => p.accountId === a.id)
             .map((p) => ({ symbol: p.symbol, quantity: p.quantity })),

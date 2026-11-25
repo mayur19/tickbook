@@ -1,4 +1,4 @@
-import type { EngineEvent } from './types.js';
+import type { EngineEvent, NewOrder, RestingOrder } from './types.js';
 
 export type OrderStatus = 'new' | 'partially_filled' | 'filled' | 'cancelled' | 'rejected';
 
@@ -101,4 +101,45 @@ export const settlementDeltas = (events: readonly EngineEvent[]): SettlementDelt
     cashDelta: v.cash,
     positionDelta: v.pos,
   }));
+};
+
+/** Cash reservation held by an incoming buy order before it was matched. */
+export interface TakerReservation {
+  readonly order: NewOrder;
+  readonly reserved: number;
+}
+
+/**
+ * Per-account change to `reserved_cash_minor` implied by one command's events.
+ * Invariant maintained: an account's reservation equals the sum of
+ * price x remaining over its resting buy orders (ADR-0019).
+ *
+ *  - a resting buy filled as maker releases price x filled quantity;
+ *  - an incoming buy releases its up-front reservation and re-reserves only what
+ *    rests on the book (price x rested remaining);
+ *  - a cancelled resting buy releases price x remaining (`cancelledResting` carries
+ *    the resting orders a cancel command removed, since cancel events omit price).
+ */
+export const reservationDeltas = (
+  events: readonly EngineEvent[],
+  taker: TakerReservation | null,
+  cancelledResting: ReadonlyMap<string, RestingOrder> = new Map(),
+): Map<string, number> => {
+  const out = new Map<string, number>();
+  const bump = (id: string, v: number): void => {
+    if (v !== 0) out.set(id, (out.get(id) ?? 0) + v);
+  };
+  if (taker && taker.order.side === 'buy') bump(taker.order.accountId, -taker.reserved);
+  for (const e of events) {
+    if (e.type === 'trade' && e.aggressorSide === 'sell')
+      bump(e.makerAccountId, -e.price * e.quantity);
+    if (e.type === 'rested' && e.side === 'buy' && taker && e.orderId === taker.order.orderId) {
+      bump(taker.order.accountId, e.price * e.remaining);
+    }
+    if (e.type === 'cancelled') {
+      const resting = cancelledResting.get(e.orderId);
+      if (resting && resting.side === 'buy') bump(resting.accountId, -resting.price * e.remaining);
+    }
+  }
+  return new Map([...out].filter(([, v]) => v !== 0));
 };
