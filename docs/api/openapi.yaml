@@ -1,0 +1,1469 @@
+openapi: 3.1.0
+info:
+  title: Tickbook API
+  version: 0.1.0
+  summary: Simulated exchange order-matching engine and paper-trading venue.
+  description: |
+    Tickbook is a **simulated venue for education and strategy testing**. No real money moves,
+    no external market data is consumed, and nothing here is a real trading service.
+
+    Conventions:
+    - Every JSON response uses the envelope `{ data, error, meta? }`.
+    - Prices and cash are **integer minor units** (cents). Quantities are integer instrument units.
+    - Authentication is a session cookie (`tb_session`, HttpOnly, SameSite=Lax). Mutating requests
+      made with a session must echo the CSRF token in `X-CSRF-Token`.
+    - Each operation carries `x-status: implemented` or `x-status: pending`. Pending operations are
+      routed and answer `501 NOT_IMPLEMENTED` with their backlog ticket in `error.details.ticket`.
+
+    ### Market-data WebSocket (implemented)
+    `GET /ws/market?symbol=TBK` upgrades to a WebSocket (session cookie required). See
+    `x-websocket` at the document root for the message contract.
+  license:
+    name: MIT
+servers:
+  - url: http://127.0.0.1:4106
+    description: Local development API
+x-websocket:
+  path: /ws/market
+  x-status: implemented
+  query:
+    symbol: Instrument symbol (case-insensitive).
+  auth: Session cookie; role needs `marketdata:read`.
+  flow: |
+    1. On connect the server sends one `snapshot` (best 20 levels per side, `DEPTH_PUBLISH_LEVELS`).
+    2. It then pushes `depth` (incremental level changes, quantity 0 = level removed) and `trade`
+       messages, each tagged with the engine sequence number `seq` of the command that caused it.
+    3. The client may send the text frame `snapshot` at any time to receive a fresh snapshot.
+    Messages with `seq` lower than the last snapshot must be ignored.
+  serverMessages:
+    snapshot: '#/components/schemas/WsSnapshot'
+    depth: '#/components/schemas/WsDepth'
+    trade: '#/components/schemas/WsTrade'
+  closeCodes:
+    '4401': Not authenticated or missing marketdata:read permission.
+    '4404': Unknown symbol.
+    '1013': Consumer too slow (more than 1 MB buffered); reconnect and resnapshot.
+tags:
+  - name: Platform
+  - name: Auth
+  - name: Instruments
+  - name: Market data
+  - name: Orders
+  - name: Accounts
+  - name: Fees and risk
+  - name: Venue admin
+  - name: Surveillance
+  - name: Reports
+  - name: Members
+security:
+  - sessionCookie: []
+paths:
+  /health:
+    get:
+      tags: [Platform]
+      operationId: getHealth
+      summary: Liveness probe
+      security: []
+      x-status: implemented
+      responses:
+        '200':
+          description: Process is up.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthEnvelope'
+  /ready:
+    get:
+      tags: [Platform]
+      operationId: getReady
+      summary: Readiness probe (database reachable, books recovered)
+      security: []
+      x-status: implemented
+      responses:
+        '200':
+          description: Ready to serve.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyEnvelope'
+        '503':
+          $ref: '#/components/responses/Error'
+  /api/v1/auth/register:
+    post:
+      tags: [Auth]
+      operationId: register
+      summary: Register a participant firm with its owner and a funded paper account
+      description: |
+        Always answers `202` with the same generic body, whether or not the email is already
+        registered, so the endpoint cannot be used to enumerate accounts. No session is issued;
+        the user signs in afterwards. Rate-limited per normalised client IP
+        (`REGISTER_RATE_LIMIT_PER_HOUR`). Email verification through the local outbox is planned (TB-812).
+      security: []
+      x-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '202':
+          description: Accepted (generic).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageEnvelope'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Sign in and receive session + CSRF cookies
+      description: |
+        Throttled per email (progressive backoff after 5 failures), per normalised IP
+        (`LOGIN_RATE_LIMIT_PER_MINUTE`) and by distinct emails per IP per minute.
+        Sets `tb_session` (HttpOnly) and `tb_csrf` (readable) cookies.
+      security: []
+      x-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Signed in.
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+              description: '`tb_session` and `tb_csrf` cookies.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginEnvelope'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          description: '`INVALID_CREDENTIALS` (generic for unknown email or wrong password).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: End the current session
+      x-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204':
+          description: Session deleted and cookies cleared.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/CsrfFailed'
+  /api/v1/auth/me:
+    get:
+      tags: [Auth]
+      operationId: getMe
+      summary: Current user, organization, role, permissions and CSRF token
+      x-status: implemented
+      responses:
+        '200':
+          description: Session details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MeEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /api/v1/auth/verify-email:
+    post:
+      tags: [Auth]
+      operationId: verifyEmail
+      summary: Confirm signup via a link delivered to the local outbox
+      security: []
+      x-status: pending
+      x-ticket: TB-812
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/instruments:
+    get:
+      tags: [Instruments]
+      operationId: listInstruments
+      summary: List instruments with last price and top-of-book quote
+      x-status: implemented
+      responses:
+        '200':
+          description: Instruments ordered by symbol.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, error]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Instrument'
+                  error:
+                    type: 'null'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/instruments/{symbol}:
+    parameters:
+      - $ref: '#/components/parameters/Symbol'
+    get:
+      tags: [Instruments]
+      operationId: getInstrument
+      summary: Instrument rules, last price and quote
+      x-status: implemented
+      responses:
+        '200':
+          description: Instrument.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, error]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Instrument'
+                  error:
+                    type: 'null'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/instruments/{symbol}/book:
+    parameters:
+      - $ref: '#/components/parameters/Symbol'
+    get:
+      tags: [Market data]
+      operationId: getBook
+      summary: Level-2 depth snapshot
+      x-status: implemented
+      parameters:
+        - name: depth
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+      responses:
+        '200':
+          description: Aggregated price levels (no order identities).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, error]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/BookSnapshot'
+                  error:
+                    type: 'null'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/instruments/{symbol}/trades:
+    parameters:
+      - $ref: '#/components/parameters/Symbol'
+    get:
+      tags: [Market data]
+      operationId: listTrades
+      summary: Recent trades (newest first, anonymous)
+      x-status: implemented
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+      responses:
+        '200':
+          description: Trades tape.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, error]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PublicTrade'
+                  error:
+                    type: 'null'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/instruments/{symbol}/candles:
+    parameters:
+      - $ref: '#/components/parameters/Symbol'
+    get:
+      tags: [Market data]
+      operationId: listCandles
+      summary: OHLCV candles aggregated from the trade tape
+      x-status: pending
+      x-ticket: TB-401
+      parameters:
+        - name: interval
+          in: query
+          schema:
+            type: string
+            enum: [1s, 1m, 5m, 15m, 1h, 1d]
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Candles (planned shape).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Candle'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/instruments/{symbol}/quote:
+    parameters:
+      - $ref: '#/components/parameters/Symbol'
+    get:
+      tags: [Market data]
+      operationId: getQuote
+      summary: Level-1 quote with session statistics
+      x-status: pending
+      x-ticket: TB-402
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/instruments/{symbol}/auction:
+    parameters:
+      - $ref: '#/components/parameters/Symbol'
+    get:
+      tags: [Market data]
+      operationId: getIndicativeAuction
+      summary: Indicative uncrossing price and volume during a call phase
+      x-status: pending
+      x-ticket: TB-521
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/orders:
+    post:
+      tags: [Orders]
+      operationId: placeOrder
+      summary: Place an order (risk-checked, matched and journaled atomically)
+      description: |
+        Executable today: `limit` (GTC, IOC, FOK) and `market` (IOC, FOK). Requests using
+        `stop`/`stop_limit` (TB-201), `displayQuantity` (iceberg, TB-202), `postOnly` (TB-203) or
+        `DAY`/`GTD` (TB-204) answer `501`. Pre-trade risk runs inside the instrument's serialized
+        section. Engine-rejected orders (tick/lot rules) consume a journal sequence number;
+        risk-rejected orders are persisted but not journaled.
+      x-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlaceOrderRequest'
+      responses:
+        '201':
+          description: Accepted by the engine; includes the executions this command produced.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaceOrderEnvelope'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Unknown instrument or account not owned by the caller's firm (`NOT_FOUND`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: '`INSTRUMENT_NOT_OPEN`, `DUPLICATE_CLIENT_ORDER_ID` or `SETTLEMENT_CONFLICT` (concurrent settlement conflict such as a database deadlock; nothing was applied, safe to retry).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422':
+          description: |
+            `PRICE_REQUIRED`, `RISK_REJECTED` (details: orderId, violations[]) or
+            `ORDER_REJECTED` (details: orderId, reason).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+    get:
+      tags: [Orders]
+      operationId: listOrders
+      summary: List the firm's orders, newest first
+      x-status: implemented
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [open, closed, all]
+            default: all
+        - name: symbol
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Orders with `meta.count` and `meta.limit`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, error]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Order'
+                  error:
+                    type: 'null'
+                  meta:
+                    type: object
+                    properties:
+                      count:
+                        type: integer
+                      limit:
+                        type: integer
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /api/v1/orders/mass-cancel:
+    post:
+      tags: [Orders]
+      operationId: massCancel
+      summary: Cancel all open orders by account or symbol
+      x-status: pending
+      x-ticket: TB-211
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/orders/{id}:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    get:
+      tags: [Orders]
+      operationId: getOrder
+      summary: Get one of the firm's orders
+      x-status: implemented
+      responses:
+        '200':
+          description: Order.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, error]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Order'
+                  error:
+                    type: 'null'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Orders]
+      operationId: cancelOrder
+      summary: Cancel a resting order (journaled)
+      x-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '200':
+          description: Cancelled order (`status=cancelled`, `cancelReason=user_requested`).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, error]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Order'
+                  error:
+                    type: 'null'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: '`ORDER_NOT_OPEN` (already filled, cancelled or rejected).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/v1/orders/{id}/replace:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    post:
+      tags: [Orders]
+      operationId: replaceOrder
+      summary: Cancel/replace (amend) price or quantity
+      x-status: pending
+      x-ticket: TB-210
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/orders/{id}/fills:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    get:
+      tags: [Orders]
+      operationId: listOrderFills
+      summary: Execution reports for an order
+      x-status: pending
+      x-ticket: TB-212
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/accounts:
+    get:
+      tags: [Accounts]
+      operationId: listAccounts
+      summary: Firm accounts with cash, reserved cash and positions
+      x-status: implemented
+      responses:
+        '200':
+          description: Accounts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, error]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Account'
+                  error:
+                    type: 'null'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+    post:
+      tags: [Accounts]
+      operationId: createAccount
+      summary: Open an additional trading account
+      x-status: pending
+      x-ticket: TB-307
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/accounts/{id}/ledger:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    get:
+      tags: [Accounts]
+      operationId: getLedger
+      summary: Double-entry settlement ledger postings
+      x-status: pending
+      x-ticket: TB-301
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/accounts/{id}/pnl:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    get:
+      tags: [Accounts]
+      operationId: getPnl
+      summary: Realised and unrealised P&L
+      x-status: pending
+      x-ticket: TB-303
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/accounts/{id}/deposits:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    post:
+      tags: [Accounts]
+      operationId: createDeposit
+      summary: Simulated cash funding
+      x-status: pending
+      x-ticket: TB-305
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/accounts/{id}/risk-limits:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    put:
+      tags: [Fees and risk]
+      operationId: putRiskLimits
+      summary: Configure account risk limits
+      x-status: pending
+      x-ticket: TB-320
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/fee-schedules:
+    get:
+      tags: [Fees and risk]
+      operationId: listFeeSchedules
+      summary: Maker/taker fee schedules
+      x-status: pending
+      x-ticket: TB-310
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/fee-schedules/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    put:
+      tags: [Fees and risk]
+      operationId: putFeeSchedule
+      summary: Edit a fee schedule
+      x-status: pending
+      x-ticket: TB-310
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/admin/instruments:
+    post:
+      tags: [Venue admin]
+      operationId: createInstrument
+      summary: List a new instrument
+      x-status: pending
+      x-ticket: TB-501
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/admin/instruments/{symbol}:
+    parameters:
+      - $ref: '#/components/parameters/Symbol'
+    patch:
+      tags: [Venue admin]
+      operationId: updateInstrument
+      summary: Edit instrument rules
+      x-status: pending
+      x-ticket: TB-502
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/admin/instruments/{symbol}/halt:
+    parameters:
+      - $ref: '#/components/parameters/Symbol'
+    post:
+      tags: [Venue admin]
+      operationId: haltInstrument
+      summary: Halt trading (journaled engine command)
+      x-status: pending
+      x-ticket: TB-510
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/admin/instruments/{symbol}/resume:
+    parameters:
+      - $ref: '#/components/parameters/Symbol'
+    post:
+      tags: [Venue admin]
+      operationId: resumeInstrument
+      summary: Resume trading
+      x-status: pending
+      x-ticket: TB-510
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/admin/instruments/{symbol}/auction:
+    parameters:
+      - $ref: '#/components/parameters/Symbol'
+    post:
+      tags: [Venue admin]
+      operationId: runAuction
+      summary: Run the opening/closing cross (uncrossing)
+      x-status: pending
+      x-ticket: TB-520
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/admin/circuit-breakers:
+    get:
+      tags: [Venue admin]
+      operationId: listCircuitBreakers
+      summary: Circuit breaker configuration and state
+      x-status: pending
+      x-ticket: TB-512
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/admin/journal/{symbol}:
+    parameters:
+      - $ref: '#/components/parameters/Symbol'
+    get:
+      tags: [Venue admin]
+      operationId: browseJournal
+      summary: Browse the command journal by sequence range
+      x-status: pending
+      x-ticket: TB-601
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/admin/snapshots:
+    post:
+      tags: [Venue admin]
+      operationId: createSnapshot
+      summary: Write an engine snapshot for faster recovery
+      x-status: pending
+      x-ticket: TB-602
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/surveillance/alerts:
+    get:
+      tags: [Surveillance]
+      operationId: listAlerts
+      summary: Surveillance alerts (wash trades, spoofing, layering)
+      x-status: pending
+      x-ticket: TB-701
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/surveillance/orders:
+    get:
+      tags: [Surveillance]
+      operationId: searchOrders
+      summary: Cross-firm order search for venue operators
+      x-status: pending
+      x-ticket: TB-702
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/reports/trade-blotter:
+    get:
+      tags: [Reports]
+      operationId: exportTradeBlotter
+      summary: Trade blotter CSV export for the firm
+      x-status: pending
+      x-ticket: TB-720
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/members:
+    get:
+      tags: [Members]
+      operationId: listMembers
+      summary: Organization members
+      x-status: pending
+      x-ticket: TB-801
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/members/invitations:
+    post:
+      tags: [Members]
+      operationId: inviteMember
+      summary: Invite a member (delivered to the local outbox)
+      x-status: pending
+      x-ticket: TB-801
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/members/{userId}:
+    parameters:
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    patch:
+      tags: [Members]
+      operationId: updateMember
+      summary: Change a member's role
+      x-status: pending
+      x-ticket: TB-802
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/audit-logs:
+    get:
+      tags: [Members]
+      operationId: searchAuditLogs
+      summary: Search the audit log
+      x-status: pending
+      x-ticket: TB-805
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /api/v1/api-keys:
+    post:
+      tags: [Members]
+      operationId: createApiKey
+      summary: Issue an API key for a strategy client
+      x-status: pending
+      x-ticket: TB-810
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: tb_session
+      description: HttpOnly, SameSite=Lax session cookie set by login. Stored server-side as an HMAC hash.
+  parameters:
+    CsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      description: Must equal the session's CSRF token (from `tb_csrf` cookie, login response or /auth/me).
+      schema:
+        type: string
+    Symbol:
+      name: symbol
+      in: path
+      required: true
+      description: Instrument symbol (case-insensitive), e.g. TBK.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9.]{1,12}$'
+    OrderId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    AccountId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  responses:
+    Error:
+      description: Error envelope.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    ValidationFailed:
+      description: '`VALIDATION_FAILED` (details.issues[] with path and message) or `INVALID_JSON`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Unauthenticated:
+      description: '`UNAUTHENTICATED`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Forbidden:
+      description: '`FORBIDDEN` (role lacks the permission).'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    CsrfFailed:
+      description: '`CSRF_FAILED`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    NotFound:
+      description: '`NOT_FOUND`.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    RateLimited:
+      description: '`RATE_LIMITED`; `Retry-After` header and details.retryAfterSeconds.'
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    NotImplemented:
+      description: Pending feature. `error.code = NOT_IMPLEMENTED`, `error.details.ticket` names the backlog ticket.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            data: null
+            error:
+              code: NOT_IMPLEMENTED
+              message: OHLCV candles is not implemented yet
+              details:
+                ticket: TB-401
+  schemas:
+    ApiError:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - BAD_REQUEST
+            - VALIDATION_FAILED
+            - INVALID_JSON
+            - UNAUTHENTICATED
+            - INVALID_CREDENTIALS
+            - FORBIDDEN
+            - CSRF_FAILED
+            - NOT_FOUND
+            - ORDER_NOT_OPEN
+            - DUPLICATE_CLIENT_ORDER_ID
+            - SETTLEMENT_CONFLICT
+            - INSTRUMENT_NOT_OPEN
+            - PRICE_REQUIRED
+            - RISK_REJECTED
+            - ORDER_REJECTED
+            - RATE_LIMITED
+            - NOT_IMPLEMENTED
+            - NOT_READY
+            - ENGINE_INCONSISTENT
+            - INTERNAL
+        message:
+          type: string
+        details: {}
+    ErrorEnvelope:
+      type: object
+      required: [data, error]
+      properties:
+        data:
+          type: 'null'
+        error:
+          $ref: '#/components/schemas/ApiError'
+    MessageEnvelope:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            message:
+              type: string
+        error:
+          type: 'null'
+    HealthEnvelope:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            status:
+              type: string
+              const: ok
+            uptimeSeconds:
+              type: integer
+        error:
+          type: 'null'
+    ReadyEnvelope:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            status:
+              type: string
+              const: ready
+            instruments:
+              type: integer
+        error:
+          type: 'null'
+    RegisterRequest:
+      type: object
+      required: [organizationName, displayName, email, password]
+      properties:
+        organizationName:
+          type: string
+          minLength: 2
+          maxLength: 120
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 120
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        password:
+          type: string
+          minLength: 12
+          maxLength: 128
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 1
+          maxLength: 128
+    LoginEnvelope:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            userId:
+              type: string
+              format: uuid
+            organizationId:
+              type: string
+              format: uuid
+            csrfToken:
+              type: string
+        error:
+          type: 'null'
+    MeEnvelope:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            user:
+              type: object
+              properties:
+                id:
+                  type: string
+                  format: uuid
+                email:
+                  type: string
+                displayName:
+                  type: string
+            organization:
+              type: object
+              properties:
+                id:
+                  type: string
+                  format: uuid
+                name:
+                  type: string
+            role:
+              type: string
+              enum: [owner, trader, viewer]
+            permissions:
+              type: array
+              items:
+                type: string
+                enum:
+                  [
+                    orders:place,
+                    orders:cancel,
+                    orders:read,
+                    accounts:read,
+                    marketdata:read,
+                    members:manage,
+                    audit:read,
+                  ]
+            csrfToken:
+              type: string
+        error:
+          type: 'null'
+    Instrument:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        symbol:
+          type: string
+        name:
+          type: string
+        currency:
+          type: string
+          example: USD
+        tickSize:
+          type: integer
+          description: Minimum price increment, minor units.
+        lotSize:
+          type: integer
+        maxOrderQty:
+          type: integer
+        referencePrice:
+          type: integer
+        priceBandBps:
+          type: integer
+          description: Fat-finger band around the last/reference price, basis points.
+        status:
+          type: string
+          enum: [open, halted, closed]
+        lastPrice:
+          type: [integer, 'null']
+        quote:
+          type: object
+          properties:
+            bid:
+              type: [integer, 'null']
+            ask:
+              type: [integer, 'null']
+    DepthLevel:
+      type: object
+      required: [price, quantity, orders]
+      properties:
+        price:
+          type: integer
+        quantity:
+          type: integer
+        orders:
+          type: integer
+    BookSnapshot:
+      type: object
+      properties:
+        symbol:
+          type: string
+        seq:
+          type: integer
+          description: Engine sequence of the last applied command.
+        bids:
+          type: array
+          items:
+            $ref: '#/components/schemas/DepthLevel'
+        asks:
+          type: array
+          items:
+            $ref: '#/components/schemas/DepthLevel'
+    PublicTrade:
+      type: object
+      properties:
+        tradeId:
+          type: integer
+        price:
+          type: integer
+        quantity:
+          type: integer
+        aggressorSide:
+          type: string
+          enum: [buy, sell]
+        executedAt:
+          type: string
+          format: date-time
+    Candle:
+      type: object
+      properties:
+        start:
+          type: string
+          format: date-time
+        open:
+          type: integer
+        high:
+          type: integer
+        low:
+          type: integer
+        close:
+          type: integer
+        volume:
+          type: integer
+    PlaceOrderRequest:
+      type: object
+      required: [accountId, symbol, side, type, quantity]
+      properties:
+        accountId:
+          type: string
+          format: uuid
+        symbol:
+          type: string
+          pattern: '^[A-Za-z0-9.]{1,12}$'
+        side:
+          type: string
+          enum: [buy, sell]
+        type:
+          type: string
+          enum: [limit, market, stop, stop_limit]
+          description: '`stop` and `stop_limit` are pending (501, TB-201).'
+        timeInForce:
+          type: string
+          enum: [GTC, IOC, FOK, DAY, GTD]
+          default: GTC
+          description: 'Market orders require IOC or FOK. `DAY`/`GTD` are pending (501, TB-204).'
+        price:
+          type: integer
+          minimum: 1
+          description: Limit price in minor units; required for limit orders, forbidden for market.
+        stopPrice:
+          type: integer
+          minimum: 1
+          description: Pending (TB-201).
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 1000000000
+        displayQuantity:
+          type: integer
+          minimum: 1
+          description: Iceberg visible quantity; pending (501, TB-202).
+        postOnly:
+          type: boolean
+          description: Pending (501, TB-203).
+        clientOrderId:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Unique per account.
+    Order:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        clientOrderId:
+          type: [string, 'null']
+        accountId:
+          type: string
+          format: uuid
+        symbol:
+          type: string
+        side:
+          type: string
+          enum: [buy, sell]
+        type:
+          type: string
+          enum: [limit, market]
+        timeInForce:
+          type: string
+          enum: [GTC, IOC, FOK]
+        price:
+          type: [integer, 'null']
+        quantity:
+          type: integer
+        filledQuantity:
+          type: integer
+        filledNotional:
+          type: integer
+          description: Sum of price x quantity over fills (minor units); average = filledNotional / filledQuantity.
+        remainingQuantity:
+          type: integer
+        status:
+          type: string
+          enum: [new, partially_filled, filled, cancelled, rejected]
+        rejectReason:
+          type: [string, 'null']
+          description: Engine reason (e.g. price_not_tick_multiple) or `risk:<violation>`.
+        cancelReason:
+          type: [string, 'null']
+          enum:
+            [
+              ioc_remainder,
+              fok_unfillable,
+              market_no_liquidity,
+              user_requested,
+              insufficient_funds,
+              null,
+            ]
+          description: '`insufficient_funds` = resting order cancelled by the venue because its account can no longer settle it (cash or position changed out of band); journaled as an engine cancel.'
+        journalSeq:
+          type: [integer, 'null']
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    Execution:
+      type: object
+      description: Execution as seen by the order owner. Counterparty identities are never disclosed.
+      properties:
+        tradeId:
+          type: integer
+        price:
+          type: integer
+        quantity:
+          type: integer
+        liquidity:
+          type: string
+          const: taker
+    PlaceOrderEnvelope:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            order:
+              $ref: '#/components/schemas/Order'
+            trades:
+              type: array
+              items:
+                $ref: '#/components/schemas/Execution'
+        error:
+          type: 'null'
+    Account:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        organizationId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        currency:
+          type: string
+        cashMinor:
+          type: integer
+        maxOrderNotional:
+          type: integer
+        maxPosition:
+          type: integer
+        reservedCashMinor:
+          type: integer
+          description: Durable column `accounts.reserved_cash_minor` = sum of price x remaining of the account's resting buys across all instruments.
+        availableCashMinor:
+          type: integer
+        positions:
+          type: array
+          items:
+            type: object
+            properties:
+              symbol:
+                type: string
+              quantity:
+                type: integer
+    WsSnapshot:
+      type: object
+      required: [type, symbol, seq, bids, asks]
+      properties:
+        type:
+          const: snapshot
+        symbol:
+          type: string
+        seq:
+          type: integer
+        bids:
+          type: array
+          items:
+            $ref: '#/components/schemas/DepthLevel'
+        asks:
+          type: array
+          items:
+            $ref: '#/components/schemas/DepthLevel'
+    WsDepth:
+      type: object
+      required: [type, symbol, seq, updates]
+      properties:
+        type:
+          const: depth
+        symbol:
+          type: string
+        seq:
+          type: integer
+        updates:
+          type: array
+          items:
+            type: object
+            properties:
+              side:
+                type: string
+                enum: [buy, sell]
+              price:
+                type: integer
+              quantity:
+                type: integer
+                description: 0 removes the level.
+              orders:
+                type: integer
+    WsTrade:
+      type: object
+      required: [type, symbol, seq, tradeId, price, quantity, aggressorSide, ts]
+      properties:
+        type:
+          const: trade
+        symbol:
+          type: string
+        seq:
+          type: integer
+        tradeId:
+          type: integer
+        price:
+          type: integer
+        quantity:
+          type: integer
+        aggressorSide:
+          type: string
+          enum: [buy, sell]
+        ts:
+          type: string
+          format: date-time
