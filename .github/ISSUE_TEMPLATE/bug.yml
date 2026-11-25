@@ -1,0 +1,22 @@
+name: Bug report
+description: Something in the simulated venue behaves incorrectly
+labels: ['type:bug']
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Include the order sequence (symbol, side, type, TIF, price, quantity) if matching is involved.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: input
+    id: seq
+    attributes:
+      label: Journal sequence number(s)
+      description: From the order response (journalSeq) or the WebSocket stream, if known.

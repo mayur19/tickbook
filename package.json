@@ -1,0 +1,44 @@
+{
+  "name": "tickbook",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Tickbook: simulated exchange order-matching engine and paper-trading venue",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c blue,magenta \"npm:dev -w @tickbook/api\" \"npm:dev -w @tickbook/web\"",
+    "build": "npm run build -w @tickbook/api && npm run build -w @tickbook/web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "npm run test --workspaces --if-present",
+    "test:coverage": "npm run test:coverage --workspaces --if-present",
+    "test:e2e": "playwright test --config e2e/playwright.config.ts",
+    "db:migrate": "npm run db:migrate -w @tickbook/api",
+    "db:seed": "npm run db:seed -w @tickbook/api",
+    "db:reset": "npm run db:reset -w @tickbook/api"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@playwright/test": "^1.65.1",
+    "@types/node": "^22.20.5",
+    "@vitest/coverage-v8": "^3.2.7",
+    "concurrently": "^10.0.7",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "fast-check": "^4.11.0",
+    "globals": "^17.14.0",
+    "prettier": "^3.10.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.74.0",
+    "vitest": "^3.2.7"
+  }
+}

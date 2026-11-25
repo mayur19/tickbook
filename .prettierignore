@@ -1,0 +1,6 @@
+dist
+coverage
+node_modules
+package-lock.json
+e2e/report
+e2e/test-results

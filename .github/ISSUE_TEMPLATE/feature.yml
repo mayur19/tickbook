@@ -1,0 +1,15 @@
+name: Feature request
+description: Propose an addition to the simulated venue
+labels: ['type:feature']
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+    validations:
+      required: true
+  - type: input
+    id: refs
+    attributes:
+      label: Related backlog tickets / requirements
+      description: e.g. TB-201, FR-012
